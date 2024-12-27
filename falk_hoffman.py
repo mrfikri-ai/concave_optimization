@@ -205,7 +205,7 @@ def solve_LP_in_direction_scipy(A, b, x0, direction):
 def approximate_eigenvectors(Q, n_eig=None):
     """
     For the Hessian = -Q (Q is PSD => -Q is NSD => phi is concave),
-    we can simply look at Q's eigen-decomposition. 
+    we can look at Q's eigen-decomposition. 
     Typically, for partition directions, we might take the largest (by magnitude) 
     eigenvectors of Q or -Q.
 
@@ -223,6 +223,9 @@ def approximate_eigenvectors(Q, n_eig=None):
 ###############################################################################
 # 4) The Falk–Hoffman code.
 #    Uses pulp for its internal pivot-based search.
+# We use a different type of algorithm: based on Collapsing polytopes
+# The original paper from Rosen used Successive Underestimation
+# Refer to: https://github.com/hblunck/FalkHoffmanAlgorithm for a reference
 ###############################################################################
 from pulp import LpProblem, LpMaximize, LpVariable, lpSum, LpStatus, value
 
@@ -535,7 +538,7 @@ def concave_min_with_falkhoffman(A, b, Q, c, r, verbose=False):
     # Step 5: Refine subdomains
     #################################################################
     # Real code would add new constraints or do a branch (like x_i <= v_i or something).
-    # We'll skip that and just keep the same domain for demonstration.
+    # I skipped that in this code and kept the same domain for demonstration.
     subdomains = [(A, b)]  
 
     #################################################################
@@ -557,6 +560,7 @@ def concave_min_with_falkhoffman(A, b, Q, c, r, verbose=False):
 
     return (global_best_sol, global_best_val)
 
+# Build the objective function in matrix form
 # QP calculation
 def qp_calculation(values, clstr_size):
     sensing_range = np.array(values)
@@ -576,12 +580,14 @@ def qp_calculation(values, clstr_size):
 
     return Q, p, r
 
+# To turn the Q to concave
 def ccv_qp_calculation(Q):
     alpha = 0.2
     eigQ = np.linalg.eigvals(Q)
     q = (Q - (np.max(eigQ.real) + alpha) * np.eye(len(Q)))
     return q
 
+# I use this to compare the approach with convex BQP
 def cvx_qp_calculation(Q):
     alpha = 0.2
     eigQ = np.linalg.eigvals(Q)
@@ -589,7 +595,7 @@ def cvx_qp_calculation(Q):
     return q
 
 ###############################################################################
-# 8) Gurobi Binary QP Solver
+# 8) Binary QP Solver using CVXPY with XPRESS Solver
 ###############################################################################
 import cvxpy as cp
 def solve_binary_qp_xpress(Q, p, r, A1, b1, A2, b2):
@@ -677,14 +683,17 @@ if __name__ == "__main__":
     # print("Solution:", sol_2)
     # print("Objective value:", val_2)
 
-    # Solve using Gurobi binary QP
-    # print("\n=== Solving with Gurobi Binary QP ===")
+    # Solve binary QP
+    # The naming was Gurobi, but changed to cvxpy due to limited size when using Gurobi
+    # print("\n=== Solving Binary QP ===")
     # sol_gurobi, val_gurobi = solve_binary_qp_xpress(QQ, p, r, A1, b1_flat, A2, b2_flat)
     # val_actual_gurobi = 0.5 * sol_gurobi.dot(q).dot(sol_gurobi) + p.dot(sol_gurobi) + r
     # print("Gurobi Binary Solution:", sol_gurobi)
     # print("Actual Objective Value (Gurobi):", val_actual_gurobi)
 
     # Rounding sol_2
+    # The feasible solution is binary, but the global solution has small fractional value
+    # We round to eliminate that small fractional value
     sol_2 = np.round(sol_2)
     val_actual = 0.5 * sol_2.dot(q).dot(sol_2) + p.dot(sol_2) + r
     print("Actual objective value Falk-Hoffman:", val_actual)
