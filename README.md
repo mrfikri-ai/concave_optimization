@@ -8,6 +8,7 @@ Python file falk_hoffman.py
 is a numerical simulation of a paper entitled: GLOBAL MINIMIZATION OF A LINEARLY CONSTRAINED CONCAVE FUNCTION BY PARTITION OF FEASIBLE DOMAIN" by J.B.Rosen
 The Falk-Hoffman algorithm has been modified. This repository does not guarantee that the flow is the same as in the paper; it is simply testing code.
 
-Python file
+Python file Tuy_Rosen.py
+is a numerical simulation from a paper entitled: 
 
 
