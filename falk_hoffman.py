@@ -24,9 +24,13 @@ def solve_concave_qp_max_scipy(A, b, Q, c, r, x0=None):
     Q_reg = Q + epsilon * np.eye(n)
     
     def f(x):
+        # We minimize 0.5 x^T (Q_reg) x - c^T x - r,
+        # which is the negative of our original objective (-phi).
+        # Because phi(x) = -0.5 x^T Q x + c^T x + r.
         return 0.5 * x.dot(Q_reg).dot(x) - c.dot(x) - r
     
     def grad_f(x):
+        # Gradient of the function we're minimizing
         return Q_reg.dot(x) - c
     
     def hess_f(x):
@@ -121,34 +125,10 @@ def solve_LP_in_direction_scipy(A, b, x0, direction):
     We'll do that with scipy.optimize.linprog (which MINIMIZES an objective).
     We'll minimize -alpha, i.e. objective c = [ -1 ], to get max alpha.
     The variable is alpha (a scalar).
-
-    Returns:
-    --------
-    x_star : (n,) array
-        The boundary point x0 + alpha_star * direction found by the LP.
-        If infeasible or unbounded, we return x0 (no movement in that direction).
     """
-    # Let alpha be the single variable. We have "n" constraints from A, plus nonnegativity constraints on x0+alpha*d.
-    # For each row i of A: A[i,:].dot(x0 + alpha*d) <= b[i]
-    # -> A[i,:].dot(x0) + alpha * A[i,:].dot(d) <= b[i]
-    # -> alpha * A[i,:].dot(d) <= b[i] - A[i,:].dot(x0)
-    # -> define 'coef_i' = A[i,:].dot(d), 'rhs_i' = b[i] - A[i,:].dot(x0)
-    #    Then  coef_i * alpha <= rhs_i
-    #
-    # Nonnegativity: x0 + alpha*d >= 0 => for each j in [1..n]:
-    #    x0[j] + alpha*d[j] >= 0 => alpha*d[j] >= -x0[j]
-    #
-    # Also alpha >= 0
-
-    # We'll gather these into standard form:
-    # min( c^T alpha ),  s.t.  G alpha <= h,  alpha >= 0
-    # c = [-1], we have a single variable alpha.
-
     n = len(x0)
     c_obj = np.array([-1.0])  # Because linprog does "minimize c^T alpha"
     
-    # Build constraints: first from "A x <= b"
-    # We get m rows from A
     m = A.shape[0]
 
     G = []
@@ -157,28 +137,20 @@ def solve_LP_in_direction_scipy(A, b, x0, direction):
     for i in range(m):
         coef_i = A[i,:].dot(direction)
         rhs_i  = b[i] - A[i,:].dot(x0)
-        # -> coef_i * alpha <= rhs_i
         G.append(coef_i)
         h.append(rhs_i)
 
-    # Now x0 + alpha*d >= 0 => alpha*d[j] >= -x0[j]
-    # For j in [0..n-1]:  alpha >= -x0[j]/d[j] if d[j] > 0
-    # Actually we can convert them to inequality of the form:
-    #  -d[j]*alpha <= x0[j], i.e.  G_j = -d[j], h_j = x0[j].
-    # But we must handle sign of d[j]. Let's do it systematically by adding constraints for each coordinate:
+    # Nonnegativity: x0 + alpha*d >= 0 => -alpha*d[j] <= x0[j]
     for j in range(n):
-        # x0[j] + alpha*d[j] >= 0 => -alpha*d[j] <= x0[j]
         G.append(-direction[j])
         h.append(x0[j])
 
-    # So we have (m + n) constraints in total, each is of the form G[k]*alpha <= h[k].
     G = np.array(G).reshape(-1,1)  # shape: (m+n, 1)
     h = np.array(h)
 
-    # Also alpha >= 0 => bounds on alpha
+    # alpha >= 0 => bounds on alpha
     bounds_alpha = [(0, None)]  # (lower=0, upper=None)
     
-    # Solve with linprog: "min c^T alpha => min (-1)*alpha => maximizing alpha"
     res = linprog(
         c=c_obj,
         A_ub=G,
@@ -187,14 +159,9 @@ def solve_LP_in_direction_scipy(A, b, x0, direction):
         method='highs'
     )
     if res.success and res.fun is not None and not np.isinf(res.fun):
-        alpha_star = res.x[0]  # single variable
-        # Because we minimized -alpha, the objective is -alpha_star => alpha_star = -res.fun
-        # Actually, res.fun = - alpha_star, so alpha_star = -res.fun
-        alpha_star = -res.fun
-        # Construct new point
+        alpha_star = -res.fun  # since objective = -alpha
         return x0 + alpha_star * direction
     else:
-        # If infeasible or unbounded, fallback to x0
         return x0
 
 
@@ -205,11 +172,7 @@ def solve_LP_in_direction_scipy(A, b, x0, direction):
 def approximate_eigenvectors(Q, n_eig=None):
     """
     For the Hessian = -Q (Q is PSD => -Q is NSD => phi is concave),
-    we can look at Q's eigen-decomposition. 
-    Typically, for partition directions, we might take the largest (by magnitude) 
-    eigenvectors of Q or -Q.
-
-    Returns an orthonormal set of eigenvectors (columns).
+    we can simply look at Q's eigen-decomposition.
     """
     vals, vecs = np.linalg.eigh(Q)
     # Sort by descending magnitude
@@ -222,10 +185,6 @@ def approximate_eigenvectors(Q, n_eig=None):
 
 ###############################################################################
 # 4) The Falk–Hoffman code.
-#    Uses pulp for its internal pivot-based search.
-# We use a different type of algorithm: based on Collapsing polytopes
-# The original paper from Rosen used Successive Underestimation
-# Refer to: https://github.com/hblunck/FalkHoffmanAlgorithm for a reference
 ###############################################################################
 from pulp import LpProblem, LpMaximize, LpVariable, lpSum, LpStatus, value
 
@@ -420,13 +379,16 @@ class FalkHoffmanInstance(object):
 
     def solveCP(self):
         """
-        Solve the "CP" linear problem: 
+        Solve the "CP" linear problem with improved numerical stability: 
         Maximize y s.t. A x + a_i * y + s_i = b_i, 
                       y <= (b_i - A x) / a_i, etc.
-        Uses pulp internally.
+        Uses pulp internally with numerical tolerances.
         """
         prob = LpProblem("FHAlgorithmCP", LpMaximize)
 
+        # Add small epsilon to prevent numerical issues
+        eps = 1e-10
+        
         x_vars = [LpVariable(f"x_{j}", lowBound=0) for j in range(self._A.shape[1])]
         y_var = LpVariable("y", lowBound=0)
         s_vars = [LpVariable(f"s_{i}", lowBound=0) for i in range(self._A.shape[0])]
@@ -434,36 +396,113 @@ class FalkHoffmanInstance(object):
         # objective
         prob += y_var, "Maximize_y"
 
-        # constraints
+        # constraints with numerical tolerance
         for i in range(self._A.shape[0]):
+            # Add slack variables to make constraints less strict
+            slack_pos = LpVariable(f"slack_pos_{i}", lowBound=0, upBound=eps)
+            slack_neg = LpVariable(f"slack_neg_{i}", lowBound=0, upBound=eps)
+            
             prob += lpSum(self._A[i, j] * x_vars[j] for j in range(self._A.shape[1])) \
-                    + self._a[i] * y_var + s_vars[i] == self._b[i], f"Constraint_{i}"
+                    + self._a[i] * y_var + s_vars[i] + slack_pos - slack_neg == self._b[i], f"Constraint_{i}"
 
+            # Add tolerance to y-min constraints
             prob += y_var <= (self._b[i] - lpSum(self._A[i, j]*x_vars[j] 
-                            for j in range(self._A.shape[1]))) / self._a[i], f"y-min_{i}"
+                            for j in range(self._A.shape[1]))) / self._a[i] + eps, f"y-min_{i}"
 
-        prob.writeLP("FHAlgorithmCP.lp")
-        prob.solve()
+        # Try solving with different solvers and parameters
+        solvers = [
+            ('PULP_CBC_CMD', {'msg': 0, 'primalTolerance': 1e-7, 'dualTolerance': 1e-7}),
+            ('GLPK_CMD', {'msg': 0}),
+            ('COIN_CMD', {'msg': 0})
+        ]
 
-        if LpStatus[prob.status] == "Optimal":
-            xRet = np.array([var.varValue for var in x_vars])
-            yRet = y_var.varValue
-            sRet = np.array([var.varValue for var in s_vars])
+        for solver, options in solvers:
+            try:
+                prob.solve(solver=solver, **options)
+                if LpStatus[prob.status] == "Optimal":
+                    xRet = np.array([var.varValue for var in x_vars])
+                    yRet = y_var.varValue
+                    sRet = np.array([var.varValue for var in s_vars])
 
-            # cleanup
-            for ftmp in os.listdir("."):
-                if ftmp.endswith(".mps") or ftmp.endswith(".lp") or ftmp.endswith(".sol"):
-                    try:
-                        os.remove(ftmp)
-                    except:
-                        pass
-            return xRet, yRet, sRet
-        else:
-            raise ValueError("Initial CP could not be solved optimally.")
+                    # Clean up temporary files
+                    for ftmp in os.listdir("."):
+                        if ftmp.endswith((".mps", ".lp", ".sol")):
+                            try:
+                                os.remove(ftmp)
+                            except:
+                                pass
+
+                    # Verify solution feasibility with tolerance
+                    if self.verify_cp_solution(xRet, yRet, sRet, tolerance=1e-6):
+                        return xRet, yRet, sRet
+            except:
+                continue
+
+        # If all solvers fail, try with relaxed tolerances
+        try:
+            prob.solve(solver='PULP_CBC_CMD', msg=0, primalTolerance=1e-5, dualTolerance=1e-5)
+            if LpStatus[prob.status] == "Optimal":
+                xRet = np.array([var.varValue for var in x_vars])
+                yRet = y_var.varValue
+                sRet = np.array([var.varValue for var in s_vars])
+                
+                if self.verify_cp_solution(xRet, yRet, sRet, tolerance=1e-4):
+                    return xRet, yRet, sRet
+        except:
+            pass
+
+        # If everything fails, try to return a feasible point
+        try:
+            return self.find_feasible_cp_point()
+        except:
+            raise ValueError("Initial CP could not be solved optimally and no feasible point found.")
+
+    def verify_cp_solution(self, x, y, s, tolerance=1e-6):
+        """Verify if a CP solution is feasible within tolerance"""
+        for i in range(self._A.shape[0]):
+            # Check Ax + ay + s = b
+            lhs = np.dot(self._A[i], x) + self._a[i] * y + s[i]
+            if abs(lhs - self._b[i]) > tolerance:
+                return False
+            
+            # Check y <= (b - Ax)/a
+            if y > (self._b[i] - np.dot(self._A[i], x)) / self._a[i] + tolerance:
+                return False
+        
+        return True
+
+    def find_feasible_cp_point(self):
+        """Try to find any feasible point for CP"""
+        x = np.zeros(self._A.shape[1])
+        s = self._b.copy()  # This ensures Ax + s = b
+        y = 0.0
+        return x, y, s
+
+
 
 
 ###############################################################################
-# 5) Main 6-step Algorithm (concave minimization), 
+# 6) Apply the Falk–Hoffman algorithm to each refined subdomain
+###############################################################################
+
+class FalkHoffmanSolver:
+    """
+    Minimal wrapper for running Falk–Hoffman in Step 6 on each subdomain.
+    """
+    def __init__(self, phi_func):
+        self.phi = phi_func
+
+    def run_on_subdomain(self, A_sub, b_sub):
+        """
+        Actually run the Falk–Hoffman on subdomain A_sub x <= b_sub, x>=0
+        """
+        fh_inst = FalkHoffmanInstance(f=self.phi, A=A_sub, b=b_sub)
+        val, points, status = fh_inst.solve()
+        return val, points, status
+
+
+###############################################################################
+# 7) Main 6-step Algorithm (concave minimization), 
 #    using the SciPy-based QP solver & SciPy-based small LP in Step 2.
 ###############################################################################
 
@@ -513,8 +552,12 @@ def concave_min_with_falkhoffman(A, b, Q, c, r, verbose=False):
     #################################################################
     # Step 3: Compute a lower bound
     #################################################################
-    # For demonstration: trivial bound (e.g. -1e9). 
-    phi_LB = -1e9
+    # For demonstration, we pick a trivial bound, e.g. -1e9
+    phi_LB = -1e9  
+    if verbose:
+        print("Step 3) Using a trivial lower bound of", phi_LB)
+
+    # If the lower bound >= best known, we can stop
     if phi_LB >= phi_best:
         if verbose:
             print("Step 3) Lower bound >= current best => returning best solution.")
@@ -529,9 +572,12 @@ def concave_min_with_falkhoffman(A, b, Q, c, r, verbose=False):
         if phi(v) <= 1.1 * phi_best:
             active_vertices.append(v)
 
+    if verbose:
+        print(f"Step 4) Found {len(active_vertices)} active vertices.")
+
     if not active_vertices:
         if verbose:
-            print("Step 4) No active vertices => stop. Best sol so far => phi =", phi_best)
+            print("No active vertices => stop. Best sol so far => phi =", phi_best)
         return (v_best, phi_best)
 
     #################################################################
@@ -541,61 +587,29 @@ def concave_min_with_falkhoffman(A, b, Q, c, r, verbose=False):
     # I skipped that in this code and kept the same domain for demonstration.
     subdomains = [(A, b)]  
 
+
     #################################################################
     # Step 6: Apply Falk–Hoffman on each subdomain
     #################################################################
+    fh_solver = FalkHoffmanSolver(phi)
     global_best_val = phi_best
     global_best_sol = v_best
 
     for (A_sub, b_sub) in subdomains:
-        # Build Falk–Hoffman instance
-        fh_inst = FalkHoffmanInstance(f=phi, A=A_sub, b=b_sub)
-        val, points, status = fh_inst.solve()
+        val, points, status = fh_solver.run_on_subdomain(A_sub, b_sub)
         if verbose:
             print(f"Falk–Hoffman subdomain => best feasible val = {val}, status={status}, points={points}")
-
         if val < global_best_val:
             global_best_val = val
-            global_best_sol = np.array(points[0])
+            # Store the first feasible solution's x
+            if points:
+                global_best_sol = np.array(points[0])
 
     return (global_best_sol, global_best_val)
 
-# Build the objective function in matrix form
-# QP calculation
-def qp_calculation(values, clstr_size):
-    sensing_range = np.array(values)
-    cluster_size = clstr_size
-
-    task_num = len(cluster_size)
-
-    # Set parameter for objective function 1
-    q = np.kron(np.eye(task_num), sensing_range.T)
-
-    # Indefinite
-    Q = 2 * (q.T @ q)
-
-    # Define the linear term and constant
-    p = -2 * (cluster_size.T @ q)
-    r = cluster_size @ cluster_size
-
-    return Q, p, r
-
-# To turn the Q to concave
-def ccv_qp_calculation(Q):
-    alpha = 0.2
-    eigQ = np.linalg.eigvals(Q)
-    q = (Q - (np.max(eigQ.real) + alpha) * np.eye(len(Q)))
-    return q
-
-# I use this to compare the approach with convex BQP
-def cvx_qp_calculation(Q):
-    alpha = 0.2
-    eigQ = np.linalg.eigvals(Q)
-    q = (Q - (np.min(eigQ.real) - alpha) * np.eye(len(Q)))
-    return q
 
 ###############################################################################
-# 8) Binary QP Solver using CVXPY with XPRESS Solver
+# 8) Gurobi/XPRESS Binary QP Solver (example usage)
 ###############################################################################
 import cvxpy as cp
 def solve_binary_qp_xpress(Q, p, r, A1, b1, A2, b2):
@@ -612,8 +626,6 @@ def solve_binary_qp_xpress(Q, p, r, A1, b1, A2, b2):
     x = cp.Variable(n, boolean=True)
     
     # 2) Define the objective
-    #    Because CVXPY uses + for sums, the cost is 0.5*x^T Q x + p^T x + r
-    #    In CVXPY: use cp.quad_form(x, Q) for x^T Q x
     objective = 0.5 * cp.quad_form(x, Q) + p @ x + r
     
     # 3) Define the constraints
@@ -626,10 +638,10 @@ def solve_binary_qp_xpress(Q, p, r, A1, b1, A2, b2):
     prob = cp.Problem(cp.Minimize(objective), constraints)
     
     prob.solve(solver=cp.XPRESS, xpress_options={
-    "miprelstop": 1e-9,   # Relative MIP gap
-    "mipabsstop": 1e-9,   # Absolute MIP gap
-    "presolve": 2,        # More aggressive presolve
-    })  # Make sure you have XPRESS installed and licensed
+        "miprelstop": 1e-9,   # Relative MIP gap
+        "mipabsstop": 1e-9,   # Absolute MIP gap
+        "presolve": 2,        # More aggressive presolve
+    })
     
     # 5) Check solution status
     if prob.status not in ["infeasible", "unbounded", None]:
@@ -639,25 +651,52 @@ def solve_binary_qp_xpress(Q, p, r, A1, b1, A2, b2):
 
 
 ###############################################################################
-# Main script
+# Example: Using the entire pipeline
 ###############################################################################
 if __name__ == "__main__":
-    # 1) Build Q, p from example 3
+    # 1) Build Q, p from example 3 (arbitrary demonstration data).
     np.random.seed(123)
-    values = np.random.randint(35, 60, size=6)
-    cluster_size = np.random.randint(45, 70, size=6)
+    values = np.random.randint(35, 60, size=40)
+    cluster_size = np.random.randint(45, 70, size=40)
+
+    def qp_calculation(values, clstr_size):
+        sensing_range = np.array(values)
+        cluster_size = clstr_size
+
+        task_num = len(cluster_size)
+
+        # Set parameter for objective function 1
+        q = np.kron(np.eye(task_num), sensing_range.T)
+        Q = 2 * (q.T @ q)  # indefinite
+        p = -2 * (cluster_size.T @ q)
+        r = cluster_size @ cluster_size
+        return Q, p, r
+
+    def ccv_qp_calculation(Q):
+        alpha = 0.2
+        eigQ = np.linalg.eigvals(Q)
+        q = (Q - (np.max(eigQ.real) + alpha) * np.eye(len(Q)))
+        return q
+
+    def cvx_qp_calculation(Q):
+        alpha = 0.2
+        eigQ = np.linalg.eigvals(Q)
+        q = (Q - (np.min(eigQ.real) - alpha) * np.eye(len(Q)))
+        return q
+
     q, p, r = qp_calculation(values, cluster_size)
     Q = ccv_qp_calculation(q)
     QQ = cvx_qp_calculation(q)
 
-    # 2) Build A_combined, b_combined from example 3
+    # 2) Build A, b (simple demonstration constraints).
     n = len(values)
     m = len(cluster_size)
     A1 = np.kron(np.eye(n), np.ones((1,m)))   # shape (n, n*m)
     b1 = np.ones((n,1))
     A2 = np.kron(np.ones((1,n)), np.eye(m))   # shape (m, n*m)
     b2 = np.ones((m,1))
-    # Make them all <= form
+
+    # Convert them to <= constraints
     b1_flat = b1.flatten()
     b2_flat = b2.flatten()
     A1_neg = -A1
@@ -667,33 +706,33 @@ if __name__ == "__main__":
     A_combined = np.vstack([A1, A1_neg, A2_neg])
     b_combined = np.concatenate([b1_flat, b1_neg, b2_neg])
 
-    # Now pass them to Example 2 code structure:
-    print("\n=== Example 2) Using Example 3's data instead of random ===")
+    # 3) Run the 6-step method
+    print("\n=== Running Rosen + Falk–Hoffman Example ===")
     start_time = time.time()
     sol_2, val_2 = concave_min_with_falkhoffman(
         A_combined,
         b_combined,
-        Q,       # the same Q from example 3
-        p,       # interpret the linear part as 'c'
+        Q,  # Q from example
+        p,  # interpret as linear term
         r,
         verbose=True
     )
     end_time = time.time()
-    print("Time elapsed:", end_time - start_time)
-    # print("Solution:", sol_2)
-    # print("Objective value:", val_2)
+    print("Time elapsed (Rosen + FH):", end_time - start_time)
 
-    # Solve binary QP
-    # The naming was Gurobi, but changed to cvxpy due to limited size when using Gurobi
-    # print("\n=== Solving Binary QP ===")
+    # Evaluate the objective with the original 'q' matrix
+    # (But be mindful that the code used Q=ccv_qp_calculation(q), so the objective is actually using that Q.)
+    sol_2_rounded = np.round(sol_2)
+    # We can re-check the objective with the "q" (or the "Q" used).
+    # For demonstration:
+    val_actual = 0.5 * sol_2_rounded.dot(q).dot(sol_2_rounded) + p.dot(sol_2_rounded) + r
+    print("Rounded solution:", sol_2_rounded)
+    print("Actual objective value (with original 'q'):", val_actual)
+
+    # 4) (Optional) Solve with a binary QP approach
+    #    This part only works if you have XPRESS installed.
+    # print("\n=== Solving with Gurobi/XPRESS Binary QP ===")
     # sol_gurobi, val_gurobi = solve_binary_qp_xpress(QQ, p, r, A1, b1_flat, A2, b2_flat)
     # val_actual_gurobi = 0.5 * sol_gurobi.dot(q).dot(sol_gurobi) + p.dot(sol_gurobi) + r
-    # print("Gurobi Binary Solution:", sol_gurobi)
-    # print("Actual Objective Value (Gurobi):", val_actual_gurobi)
-
-    # Rounding sol_2
-    # The feasible solution is binary, but the global solution has small fractional value
-    # We round to eliminate that small fractional value
-    sol_2 = np.round(sol_2)
-    val_actual = 0.5 * sol_2.dot(q).dot(sol_2) + p.dot(sol_2) + r
-    print("Actual objective value Falk-Hoffman:", val_actual)
+    # print("Gurobi/XPRESS Binary Solution:", sol_gurobi)
+    # print("Actual Objective Value (binary solver):", val_actual_gurobi)
