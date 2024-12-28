@@ -9,6 +9,9 @@ is a numerical simulation of a paper entitled: GLOBAL MINIMIZATION OF A LINEARLY
 The Falk-Hoffman algorithm has been modified. This repository does not guarantee that the flow is the same as in the paper; it is simply testing code.
 
 Python file Tuy_Rosen.py
-is a numerical simulation from a paper entitled: 
+is a numerical simulation from a paper entitled: Cutting Plane/Tabu Search Algorithms for Low Rank Concave Quadratic Programming Problems
+Please examine the code first to the algorithm's steps in the paper. 
 
+## Use it with your own risk
+Meaning, double check the code here before you use it. I sometimes doubt with my skill for translating mathematical steps to code implementation.
 
