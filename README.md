@@ -17,6 +17,6 @@ is a numerical simulation from a paper entitled: GLOBAL MINIMIZATION OF A LINEAR
 The Falk-Hoffman algorithm used the reference paper a successive underestimation by Falk and Hoffman.
 
 
-## Use it with your own risk
+## Use it with double-checking
 This means you should double-check the code here before you use it.
-
+There might be some errors in the code implementation, carefully read the reference paper for validation
