@@ -1,6 +1,6 @@
 # concave_optimization
 Welcome to the concave_optimization repository.
-This repository aims to showcase several global optimizations mostly on concave programming. I took the test of the existing method from paper.
+This repository aims to be showcase to several global optimizations mostly on concave programming. I took the test of the existing method from paper.
 If you use this repo and it works, please don't forget to cite it. If it does not work, please let me know.
 
 ## File and its associated paper
